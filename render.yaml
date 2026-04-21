@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: trackingdeals-backend
+    runtime: node
+    plan: starter
+    autoDeploy: true
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.12.0
+      - key: MIN_NOTIONAL_USD
+        value: 100
+      - key: EMAIL_ALERT_THRESHOLD_USD
+        value: 10000
+      - key: ALERT_EMAIL_TO
+        value: chessboychef@gmail.com
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ALERT_EMAIL_FROM
+        sync: false

@@ -10,11 +10,22 @@ function defaultWsUrl() {
     const port = import.meta.env.VITE_WATCH_PORT ?? '3001'
     return `ws://${host}:${port}`
   }
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${window.location.host}`
+
+  if (import.meta.env.VITE_USE_SAME_ORIGIN_WS === 'true') {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//${window.location.host}`
+  }
+
+  return null
 }
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? defaultWsUrl()
+
+function wsConfigError() {
+  if (import.meta.env.DEV) return null
+  if (WS_URL) return null
+  return 'Set VITE_WS_URL to your deployed watcher backend WebSocket URL, or set VITE_USE_SAME_ORIGIN_WS=true if you deploy the frontend and Node server on the same host.'
+}
 
 type TradeRow = {
   trade_id: string
@@ -162,6 +173,7 @@ export default function App() {
   const [closeBeforeLocal, setCloseBeforeLocal] = useState('')
   const [userMinNotionalInput, setUserMinNotionalInput] = useState('')
   const [clock, setClock] = useState(() => Date.now())
+  const [connError, setConnError] = useState<string | null>(wsConfigError)
 
   useEffect(() => {
     const id = window.setInterval(() => setClock(Date.now()), 30_000)
@@ -178,6 +190,11 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!WS_URL) {
+      setConn('closed')
+      return
+    }
+
     let stopped = false
     let ws: WebSocket | null = null
     let retryTimer: ReturnType<typeof setTimeout> | undefined
@@ -186,6 +203,7 @@ export default function App() {
     const connect = () => {
       if (stopped) return
       setConn('connecting')
+      setConnError(null)
       ws = new WebSocket(WS_URL)
 
       ws.onopen = () => {
@@ -259,6 +277,11 @@ export default function App() {
       }
 
       ws.onerror = () => {
+        if (!stopped) {
+          setConnError(
+            `Could not connect to ${WS_URL}. On Netlify, point VITE_WS_URL at a separately deployed Node watcher backend.`,
+          )
+        }
         ws?.close()
       }
     }
@@ -333,7 +356,9 @@ export default function App() {
 
   const emptyMessage =
     rows.length === 0
-      ? `No qualifying prints yet (server requires notional ≥ ${formatUsd(minTracked)} in the allowed categories). Leave this tab open.`
+      ? connError
+        ? connError
+        : `No qualifying prints yet (server requires notional ≥ ${formatUsd(minTracked)} in the allowed categories). Leave this tab open.`
       : filteredRows.length === 0
         ? effectiveMinNotionalUsd > minTracked
           ? `Nothing meets your minimum notional (${formatUsd(effectiveMinNotionalUsd)}). Try lowering “Minimum notional” or other filters.`
@@ -365,10 +390,13 @@ export default function App() {
             Last poll: <time>{formatTime(status.lastPollOk)}</time>
           </span>
         )}
+        {connError && (
+          <span className="err">Connection: {connError}</span>
+        )}
         {status?.lastPollErr && (
           <span className="err">API: {status.lastPollErr}</span>
         )}
-        <span className="mono">WS {WS_URL}</span>
+        {WS_URL ? <span className="mono">WS {WS_URL}</span> : <span className="mono">WS not configured</span>}
       </section>
 
       <section className="filters" aria-label="Table filters">

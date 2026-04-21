@@ -12,6 +12,10 @@
  *   MARKET_CACHE_MS           — GET /markets/{ticker} cache TTL (default 600000)
  *   EVENT_CACHE_MS            — GET /events/{ticker} cache TTL (default 300000)
  *   SERIES_CACHE_MS           — GET /series/{ticker} cache TTL (default 600000)
+ *   EMAIL_ALERT_THRESHOLD_USD — email bets at/above this notional (default 10000)
+ *   ALERT_EMAIL_TO            — recipient email (default chessboychef@gmail.com)
+ *   RESEND_API_KEY            — enables email sending through Resend if set
+ *   ALERT_EMAIL_FROM          — verified sender for Resend (required when RESEND_API_KEY is set)
  */
 
 import http from 'node:http'
@@ -36,6 +40,15 @@ const POLL_MS = Number(process.env.POLL_MS || 2500)
 const MARKET_CACHE_MS = Number(process.env.MARKET_CACHE_MS || 600_000)
 const EVENT_CACHE_MS = Number(process.env.EVENT_CACHE_MS || 300_000)
 const SERIES_CACHE_MS = Number(process.env.SERIES_CACHE_MS || 600_000)
+const _emailThresholdParsed = Number(process.env.EMAIL_ALERT_THRESHOLD_USD)
+const EMAIL_ALERT_THRESHOLD_USD =
+  Number.isFinite(_emailThresholdParsed) && _emailThresholdParsed > 0
+    ? _emailThresholdParsed
+    : 10_000
+const EMAIL_ALERT_THRESHOLD_CENTS = Math.round(EMAIL_ALERT_THRESHOLD_USD * 100)
+const ALERT_EMAIL_TO = (process.env.ALERT_EMAIL_TO || 'chessboychef@gmail.com').trim()
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim()
+const ALERT_EMAIL_FROM = (process.env.ALERT_EMAIL_FROM || '').trim()
 
 /** Politics + elections; culture maps to Entertainment + Social on Kalshi; Economics. */
 const DEFAULT_ALLOWED =
@@ -71,6 +84,8 @@ const MAX_SEEN = 80_000
 let lastPollOk = null
 let lastPollErr = null
 let pollIteration = 0
+let lastEmailOk = null
+let lastEmailErr = null
 
 function pruneSeen() {
   if (seenTradeIds.size <= MAX_SEEN) return
@@ -177,6 +192,112 @@ function sortRecentByTimeDesc() {
   recentAlerts.sort((a, b) => Date.parse(b.created_time) - Date.parse(a.created_time))
 }
 
+function formatUsd(n) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(n)
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function formatMaybeTime(iso) {
+  const ms = Date.parse(iso)
+  if (!Number.isFinite(ms)) return iso || 'Unknown'
+  return new Date(ms).toLocaleString('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+    timeZone: 'America/New_York',
+  })
+}
+
+function emailEnabled() {
+  return Boolean(RESEND_API_KEY && ALERT_EMAIL_FROM && ALERT_EMAIL_TO)
+}
+
+function alertEmailPayload(alert) {
+  const subject = `Kalshi bet alert: ${formatUsd(alert.notional_usd)} on ${alert.event_title || alert.ticker}`
+  const details = [
+    ['Trade ID', alert.trade_id],
+    ['Amount bet', formatUsd(alert.notional_usd)],
+    ['Contracts', alert.count_fp],
+    ['Side', String(alert.taker_side).toUpperCase()],
+    ['Category', alert.category || 'Unknown'],
+    ['Event', alert.event_title || alert.event_ticker || 'Unknown'],
+    ['Market', alert.market_label || alert.ticker],
+    ['Market ticker', alert.ticker],
+    ['Event ticker', alert.event_ticker],
+    ['Trade time', formatMaybeTime(alert.created_time)],
+    ['Close time', formatMaybeTime(alert.close_time)],
+    [
+      'Hours to close',
+      typeof alert.hours_to_close === 'number' ? `${alert.hours_to_close.toFixed(1)} hours` : 'Unknown',
+    ],
+    ['Yes price', alert.yes_price_dollars],
+    ['No price', alert.no_price_dollars],
+    ['Username', alert.username || 'Not provided by Kalshi public feed'],
+    ['Rules', alert.rules_primary || 'Not available'],
+  ]
+  const text = [
+    'High-value Kalshi bet detected.',
+    '',
+    ...details.map(([label, value]) => `${label}: ${value}`),
+  ].join('\n')
+  const html = [
+    '<h1>High-value Kalshi bet detected</h1>',
+    '<table>',
+    ...details.map(
+      ([label, value]) =>
+        `<tr><td style="padding:4px 12px 4px 0;"><strong>${escapeHtml(label)}</strong></td><td style="padding:4px 0;">${escapeHtml(value)}</td></tr>`,
+    ),
+    '</table>',
+  ].join('')
+  return { subject, text, html }
+}
+
+async function sendEmailAlert(alert) {
+  if (Math.round(alert.notional_usd * 100) < EMAIL_ALERT_THRESHOLD_CENTS) return
+  if (!emailEnabled()) {
+    lastEmailErr =
+      'Email alert skipped: set RESEND_API_KEY and ALERT_EMAIL_FROM to enable delivery.'
+    return
+  }
+
+  const { subject, text, html } = alertEmailPayload(alert)
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: ALERT_EMAIL_FROM,
+      to: [ALERT_EMAIL_TO],
+      subject,
+      text,
+      html,
+    }),
+  })
+
+  if (!res.ok) {
+    const body = await res.text()
+    lastEmailErr = `email ${res.status}: ${body.slice(0, 240)}`
+    throw new Error(lastEmailErr)
+  }
+
+  lastEmailOk = new Date().toISOString()
+  lastEmailErr = null
+}
+
 /**
  * @param {object} trade
  */
@@ -249,6 +370,11 @@ async function maybeAlertFromTrade(trade) {
   if (recentAlerts.length > MAX_RECENT) recentAlerts.length = MAX_RECENT
   sortRecentByTimeDesc()
 
+  sendEmailAlert(alert).catch((err) => {
+    lastEmailErr = String(err)
+    console.error('[kalshi-watch] email alert failed', err)
+  })
+
   broadcast({ type: 'trade', payload: alert })
 }
 
@@ -307,6 +433,11 @@ app.get('/health', (_req, res) => {
     lastPollErr,
     allowedCategories: [...ALLOWED],
     minNotional: MIN_NOTIONAL_USD,
+    emailAlertThresholdUsd: EMAIL_ALERT_THRESHOLD_USD,
+    emailAlertTo: ALERT_EMAIL_TO,
+    emailEnabled: emailEnabled(),
+    lastEmailOk,
+    lastEmailErr,
   })
 })
 
@@ -333,6 +464,11 @@ wss.on('connection', (ws) => {
         recent: recentAlerts,
         allowedCategories: [...ALLOWED],
         minNotional: MIN_NOTIONAL_USD,
+        emailAlertThresholdUsd: EMAIL_ALERT_THRESHOLD_USD,
+        emailAlertTo: ALERT_EMAIL_TO,
+        emailEnabled: emailEnabled(),
+        lastEmailOk,
+        lastEmailErr,
         disclaimer: `Kalshi public trades do not include account or username. Notional ≈ contracts × taker-side price. Categories come from GET /series (series.category). “Culture” uses Entertainment and Social. Only prints with notional ≥ $${MIN_NOTIONAL_USD.toFixed(2)} (taker premium, cents-rounded) are tracked server-side.`,
       },
     }),
@@ -347,6 +483,15 @@ server.listen(PORT, () => {
   console.log(
     `[kalshi-watch] http://localhost:${PORT}  ws://localhost:${PORT}  min $${MIN_NOTIONAL_USD}  categories=[${[...ALLOWED].join(', ')}]`,
   )
+  if (emailEnabled()) {
+    console.log(
+      `[kalshi-watch] email alerts enabled: ${ALERT_EMAIL_TO} for bets >= $${EMAIL_ALERT_THRESHOLD_USD.toFixed(2)}`,
+    )
+  } else {
+    console.log(
+      `[kalshi-watch] email alerts disabled: set RESEND_API_KEY and ALERT_EMAIL_FROM to send bets >= $${EMAIL_ALERT_THRESHOLD_USD.toFixed(2)} to ${ALERT_EMAIL_TO}`,
+    )
+  }
   pollTradesOnce().catch((e) => {
     lastPollErr = String(e)
     console.error(e)

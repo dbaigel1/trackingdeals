@@ -1,73 +1,82 @@
-# React + TypeScript + Vite
+# Kalshi Bets Watcher
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This project has two runtime pieces:
 
-Currently, two official plugins are available:
+- A Vite/React frontend.
+- A Node watcher backend in [`server/watch.mjs`](/Users/danielbaigel/Desktop/projects/kalshi/kalshi-bets/server/watch.mjs) that polls Kalshi and streams updates over WebSocket.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Local development
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+In development, the frontend connects to `ws://localhost:3001` by default.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Why Netlify was failing
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+In production, Netlify only serves the frontend unless you separately deploy the Node backend. A WebSocket URL like:
+
+```text
+wss://trackingdeals.netlify.app/
 ```
+
+points back at the static site, not your watcher process, so the socket fails.
+
+## Production options
+
+Use one of these setups:
+
+1. Deploy the frontend to Netlify and the Node watcher to a separate Node host such as Render, Railway, or Fly.io.
+2. Deploy the frontend and backend together on one Node host, letting [`server/watch.mjs`](/Users/danielbaigel/Desktop/projects/kalshi/kalshi-bets/server/watch.mjs) serve `dist/`.
+
+### Netlify frontend + separate backend
+
+Deploy the backend somewhere that supports a long-lived Node process and WebSockets, then set this environment variable in Netlify before building:
+
+```text
+VITE_WS_URL=wss://your-backend.example.com
+```
+
+The frontend will use that WebSocket endpoint in production.
+
+This repo now includes [`render.yaml`](/Users/danielbaigel/Desktop/projects/kalshi/kalshi-bets/render.yaml:1) so Render can create the backend service with the correct commands automatically.
+
+### Email alerts for bets over $10,000
+
+The watcher can also email `chessboychef@gmail.com` whenever a tracked trade is at or above `$10,000.00` notional.
+
+Set these backend environment variables on the server that runs [`server/watch.mjs`](/Users/danielbaigel/Desktop/projects/kalshi/kalshi-bets/server/watch.mjs):
+
+```text
+EMAIL_ALERT_THRESHOLD_USD=10000
+ALERT_EMAIL_TO=chessboychef@gmail.com
+RESEND_API_KEY=your_resend_api_key
+ALERT_EMAIL_FROM=alerts@your-verified-domain.com
+```
+
+Notes:
+
+1. `RESEND_API_KEY` and `ALERT_EMAIL_FROM` are required to actually send mail.
+2. `ALERT_EMAIL_FROM` must be a sender/domain verified in Resend.
+3. Each qualifying trade is only processed once by its `trade_id`, so it will only email once per trade.
+4. The email includes the amount bet, market, side, category, trade time, close time, prices, tickers, and any market rules excerpt available from Kalshi.
+
+### Single-host Node deployment
+
+Build the frontend, then run the Node server:
+
+```bash
+npm install
+npm run build
+npm start
+```
+
+If the frontend and backend share the same origin in production, set:
+
+```text
+VITE_USE_SAME_ORIGIN_WS=true
+```
+
+That tells the frontend to connect back to its own host for WebSockets.
