@@ -2,7 +2,7 @@ services:
   - type: web
     name: trackingdeals-backend
     runtime: node
-    plan: starter
+    plan: free
     autoDeploy: true
     buildCommand: npm install
     startCommand: npm start
