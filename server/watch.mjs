@@ -473,6 +473,16 @@ wss.on('connection', (ws) => {
       },
     }),
   )
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(String(raw))
+      if (msg?.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong', payload: { ts: new Date().toISOString() } }))
+      }
+    } catch {
+      // Ignore non-JSON keepalive messages.
+    }
+  })
   ws.on('close', () => {
     const i = clients.indexOf(ws)
     if (i !== -1) clients.splice(i, 1)

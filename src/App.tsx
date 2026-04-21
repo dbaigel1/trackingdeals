@@ -198,6 +198,7 @@ export default function App() {
     let stopped = false
     let ws: WebSocket | null = null
     let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let pingTimer: ReturnType<typeof setInterval> | undefined
     let backoff = 800
 
     const connect = () => {
@@ -210,6 +211,11 @@ export default function App() {
         if (stopped) return
         backoff = 800
         setConn('open')
+        pingTimer = window.setInterval(() => {
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }))
+          }
+        }, 25_000)
       }
 
       ws.onmessage = (ev) => {
@@ -269,6 +275,10 @@ export default function App() {
 
       ws.onclose = () => {
         if (stopped) return
+        if (pingTimer) {
+          window.clearInterval(pingTimer)
+          pingTimer = undefined
+        }
         setConn('closed')
         retryTimer = setTimeout(() => {
           backoff = Math.min(backoff * 1.7, 30_000)
@@ -290,6 +300,7 @@ export default function App() {
     return () => {
       stopped = true
       if (retryTimer) clearTimeout(retryTimer)
+      if (pingTimer) window.clearInterval(pingTimer)
       ws?.close()
     }
   }, [mergeTrade])
