@@ -440,6 +440,23 @@ app.get('/health', (_req, res) => {
     lastEmailErr,
   })
 })
+app.get('/snapshot', (_req, res) => {
+  sortRecentByTimeDesc()
+  res.json({
+    recent: recentAlerts.slice(0, 150),
+    lastPollOk,
+    lastPollErr,
+    allowedCategories: [...ALLOWED],
+    minNotional: MIN_NOTIONAL_USD,
+    kalshiBase: KALSHI_BASE,
+    emailAlertThresholdUsd: EMAIL_ALERT_THRESHOLD_USD,
+    emailAlertTo: ALERT_EMAIL_TO,
+    emailEnabled: emailEnabled(),
+    lastEmailOk,
+    lastEmailErr,
+    disclaimer: `Kalshi public trades do not include account or username. Notional ≈ contracts × taker-side price. Categories come from GET /series (series.category). “Culture” uses Entertainment and Social. Only prints with notional ≥ $${MIN_NOTIONAL_USD.toFixed(2)} (taker premium, cents-rounded) are tracked server-side.`,
+  })
+})
 
 const distPath = path.join(ROOT, 'dist')
 if (fs.existsSync(distPath)) {

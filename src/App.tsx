@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
+const FILTERS_STORAGE_KEY = 'kalshi-bets.filters.v1'
+
 function defaultWsUrl() {
   if (typeof window === 'undefined') return 'ws://127.0.0.1:3001'
   if (import.meta.env.DEV) {
@@ -20,6 +22,40 @@ function defaultWsUrl() {
 }
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? defaultWsUrl()
+
+type SavedFilters = {
+  categoryPick?: Record<string, boolean>
+  closeWithinHours?: string
+  closeAfterLocal?: string
+  closeBeforeLocal?: string
+  userMinNotionalInput?: string
+}
+
+function loadSavedFilters(): SavedFilters {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as SavedFilters
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function snapshotUrlFromWsUrl(wsUrl: string | null): string | null {
+  if (!wsUrl) return null
+  try {
+    const url = new URL(wsUrl)
+    url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:'
+    url.pathname = '/snapshot'
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return null
+  }
+}
 
 function wsConfigError() {
   if (import.meta.env.DEV) return null
@@ -56,6 +92,17 @@ type StatusPayload = {
   kalshiBase?: string
 }
 
+type SnapshotPayload = {
+  recent?: TradeRow[]
+  disclaimer?: string
+  lastPollOk?: string | null
+  lastPollErr?: string | null
+  pollIteration?: number
+  allowedCategories?: string[]
+  minNotional?: number
+  kalshiBase?: string
+}
+
 function formatUsd(n: number) {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
@@ -82,7 +129,9 @@ function kalshiSeriesHref(eventTicker: string) {
 }
 
 function byRecencyDesc(a: TradeRow, b: TradeRow) {
-  return Date.parse(b.created_time) - Date.parse(a.created_time)
+  const delta = Date.parse(b.created_time) - Date.parse(a.created_time)
+  if (delta !== 0) return delta
+  return b.trade_id.localeCompare(a.trade_id)
 }
 
 function hoursUntilClose(closeIso: string, now: number): number | null {
@@ -162,16 +211,17 @@ function passesCloseFilters(
 }
 
 export default function App() {
+  const savedFilters = loadSavedFilters()
   const [rows, setRows] = useState<TradeRow[]>([])
   const [conn, setConn] = useState<'connecting' | 'open' | 'closed'>('connecting')
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [disclaimer, setDisclaimer] = useState('')
   const [allowedCats, setAllowedCats] = useState<string[]>([])
-  const [categoryPick, setCategoryPick] = useState<Record<string, boolean>>({})
-  const [closeWithinHours, setCloseWithinHours] = useState('')
-  const [closeAfterLocal, setCloseAfterLocal] = useState('')
-  const [closeBeforeLocal, setCloseBeforeLocal] = useState('')
-  const [userMinNotionalInput, setUserMinNotionalInput] = useState('')
+  const [categoryPick, setCategoryPick] = useState<Record<string, boolean>>(savedFilters.categoryPick ?? {})
+  const [closeWithinHours, setCloseWithinHours] = useState(savedFilters.closeWithinHours ?? '')
+  const [closeAfterLocal, setCloseAfterLocal] = useState(savedFilters.closeAfterLocal ?? '')
+  const [closeBeforeLocal, setCloseBeforeLocal] = useState(savedFilters.closeBeforeLocal ?? '')
+  const [userMinNotionalInput, setUserMinNotionalInput] = useState(savedFilters.userMinNotionalInput ?? '')
   const [clock, setClock] = useState(() => Date.now())
   const [connError, setConnError] = useState<string | null>(wsConfigError)
 
@@ -188,6 +238,56 @@ export default function App() {
       return next.slice(0, 150)
     })
   }, [])
+
+  const applySnapshot = useCallback((payload: SnapshotPayload) => {
+    if (payload.disclaimer) setDisclaimer(payload.disclaimer)
+    const recent = Array.isArray(payload.recent) ? payload.recent : undefined
+    if (recent) {
+      setRows((prev) => {
+        const byId = new Map(prev.map((row) => [row.trade_id, row]))
+        for (const row of recent) byId.set(row.trade_id, row)
+        return [...byId.values()].sort(byRecencyDesc).slice(0, 150)
+      })
+    }
+    setStatus((prev) => ({
+      ...(prev ?? { lastPollOk: null, lastPollErr: null }),
+      ...payload,
+      lastPollOk: payload.lastPollOk ?? prev?.lastPollOk ?? null,
+      lastPollErr: payload.lastPollErr ?? prev?.lastPollErr ?? null,
+    }))
+    if (payload.allowedCategories?.length) {
+      setAllowedCats(payload.allowedCategories)
+      setCategoryPick((prev) => {
+        if (Object.keys(prev).length > 0) return prev
+        return Object.fromEntries(payload.allowedCategories!.map((c) => [c, true]))
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(
+      FILTERS_STORAGE_KEY,
+      JSON.stringify({
+        categoryPick,
+        closeWithinHours,
+        closeAfterLocal,
+        closeBeforeLocal,
+        userMinNotionalInput,
+      } satisfies SavedFilters),
+    )
+  }, [categoryPick, closeWithinHours, closeAfterLocal, closeBeforeLocal, userMinNotionalInput])
+
+  useEffect(() => {
+    if (allowedCats.length === 0) return
+    setCategoryPick((prev) => {
+      const next = Object.fromEntries(allowedCats.map((c) => [c, prev[c] !== false]))
+      const same =
+        Object.keys(next).length === Object.keys(prev).length &&
+        Object.entries(next).every(([k, v]) => prev[k] === v)
+      return same ? prev : next
+    })
+  }, [allowedCats])
 
   useEffect(() => {
     if (!WS_URL) {
@@ -225,48 +325,15 @@ export default function App() {
             payload?: unknown
           }
           if (msg.type === 'hello' && msg.payload && typeof msg.payload === 'object') {
-            const p = msg.payload as {
-              recent?: TradeRow[]
-              disclaimer?: string
-              allowedCategories?: string[]
-              minNotional?: number
-            }
-            if (p.disclaimer) setDisclaimer(p.disclaimer)
-            if (Array.isArray(p.recent)) {
-              setRows([...p.recent].sort(byRecencyDesc).slice(0, 150))
-            }
-            if (Array.isArray(p.allowedCategories) && p.allowedCategories.length > 0) {
-              setAllowedCats(p.allowedCategories)
-              setCategoryPick((prev) => {
-                if (Object.keys(prev).length > 0) return prev
-                return Object.fromEntries(p.allowedCategories!.map((c) => [c, true]))
-              })
-            }
-            setStatus((s) => {
-              const base: StatusPayload = s ?? {
-                lastPollOk: null,
-                lastPollErr: null,
-              }
-              return {
-                ...base,
-                allowedCategories: p.allowedCategories ?? base.allowedCategories,
-                minNotional: p.minNotional ?? base.minNotional,
-              }
-            })
+            const p = msg.payload as SnapshotPayload
+            applySnapshot(p)
           }
           if (msg.type === 'trade' && msg.payload) {
             mergeTrade(msg.payload as TradeRow)
           }
           if (msg.type === 'status' && msg.payload) {
-            setStatus(msg.payload as StatusPayload)
             const st = msg.payload as StatusPayload
-            if (st.allowedCategories?.length) {
-              setAllowedCats(st.allowedCategories)
-              setCategoryPick((prev) => {
-                if (Object.keys(prev).length > 0) return prev
-                return Object.fromEntries(st.allowedCategories!.map((c) => [c, true]))
-              })
-            }
+            applySnapshot(st)
           }
         } catch {
           /* ignore */
@@ -303,7 +370,43 @@ export default function App() {
       if (pingTimer) window.clearInterval(pingTimer)
       ws?.close()
     }
-  }, [mergeTrade])
+  }, [applySnapshot, mergeTrade])
+
+  useEffect(() => {
+    const snapshotUrl = snapshotUrlFromWsUrl(WS_URL)
+    if (!snapshotUrl) return
+
+    let stopped = false
+
+    const fetchSnapshot = async () => {
+      try {
+        const res = await fetch(snapshotUrl, { cache: 'no-store' })
+        if (!res.ok) throw new Error(`snapshot ${res.status}`)
+        const payload = (await res.json()) as SnapshotPayload
+        if (!stopped) {
+          applySnapshot(payload)
+          if (conn !== 'open') setConnError(null)
+        }
+      } catch (err) {
+        if (!stopped && conn !== 'open') {
+          setConnError(`Snapshot fallback failed from ${snapshotUrl}: ${String(err)}`)
+        }
+      }
+    }
+
+    void fetchSnapshot()
+    const intervalId = window.setInterval(fetchSnapshot, 15_000)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void fetchSnapshot()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+
+    return () => {
+      stopped = true
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [WS_URL, applySnapshot, conn])
 
   const allowedList = status?.allowedCategories?.length
     ? status.allowedCategories
